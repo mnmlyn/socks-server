@@ -10,13 +10,13 @@ Buffer::Buffer(int len) {
         perror("Buffer len <= 0\n");
         exit(-1);
     }
-    this->head = new char(len);
+    this->head = new char[len];
     this->len = len;
     this->dataLen = 0;
 }
 
 Buffer::~Buffer() {
-    delete this->head;
+    delete[] this->head;
 }
 
 char *Buffer::getStart() {

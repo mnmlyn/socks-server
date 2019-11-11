@@ -305,8 +305,14 @@ void dataIn(int connfd, int epfd) {
     printMap();
     Connection *conn = it->second;
     LOGP(DEBUG, "%p\n", conn);
+    LOGP(DEBUG, "conn->buff = %p\n", conn->buff);
+    LOGP(DEBUG, "conn->upBuff = %p\n", conn->upBuff);
     Buffer **pBuff = conn->fd == connfd ? &conn->buff : &conn->upBuff;
     Buffer *buff = *pBuff ? *pBuff : (*pBuff = new Buffer(MAXLINE));
+    LOGP(DEBUG, "buff = %p\n", buff);
+    LOGP(DEBUG, "*pBuff = %p\n", *pBuff);
+    LOGP(DEBUG, "conn->buff = %p\n", conn->buff);
+    LOGP(DEBUG, "conn->upBuff = %p\n", conn->upBuff);
     
     printMap();
     dumpConnection(conn);
@@ -328,6 +334,7 @@ void dataIn(int connfd, int epfd) {
     
     //int n = recv(connfd, buff->getStart(), buff->getRemainLen(), 0);
     printMap(); // ? 这里出错，看来不是recv的问题，而是将内容复制到缓冲区出错
+    LOGP(DEBUG, "n = %d\n", n);
     memcpy(buff->getStart(), recvbuff, n);
     printMap();
     if (n > 0) {
