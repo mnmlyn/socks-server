@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "logging.h"
 
 Buffer::Buffer(int len) {
     if (len <= 0) {
@@ -65,4 +66,30 @@ void Buffer::pop(int n) {
 
 bool Buffer::isEmpty() {
     return this->dataLen == 0;
+}
+
+void Buffer::print() {
+    LOGP(DEBUG, "========print buff========\n");
+
+    if (this->dataLen <= 0) {
+        LOGP(DEBUG, "buff empty\n");
+        return;
+    } else {
+        LOGP(DEBUG, "buff dataLen = %d\n", this->dataLen);
+    }
+    int n = this->dataLen;
+    int i = 0;
+    int count;
+    while (i<n) {
+        count = 0;
+        for (;i<n && count++ < 8;++i) {
+            LOGP(DEBUG, "%02x ", (unsigned char)this->head[i]);
+        }
+        LOGP(DEBUG, " ");
+        for (;i<n && count++ < 16;++i) {
+            LOGP(DEBUG, "%02x ", (unsigned char)this->head[i]);
+        }
+        LOGP(DEBUG, "\n");
+    }
+    LOGP(DEBUG, "--------------------------\n");
 }

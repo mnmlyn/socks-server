@@ -18,26 +18,6 @@ char recvbuff[MAXLINE];
 char sendbuff[MAXLINE];
 ConnectionMap connMap;
 
-// void printBuffer(Buffer* buff) {
-//     LOGP(DEBUG, "-----print buff-----\n");
-//     if (buff == NULL) {
-//         LOGP(DEBUG, "buff * NULL\n");
-//     }
-//     if (buff->dataLen <= 0) {
-//         LOGP(DEBUG, "buff empty\n");
-//         return;
-//     }
-//     int n = buff->dataLen;
-//     int i = 0;
-//     int count;
-//     while (n > 0) {
-//         for (;i<n && i<8;++i) {
-//             LOGP(DEBUG, "%02x ", buff->head[]);
-//         }
-//     }
-
-// }
-
 void setnonblocking(int sock)
 {
     int opts;     
@@ -295,13 +275,25 @@ void dumpConnection(Connection *conn) {
     LOGP(DEBUG, "Connection: fd=%d, fd_up=%d\n", conn->fd, conn->fd_up);
 }
 
+void printMap() {
+    LOGP(DEBUG, "======PRINT MAP======\n");
+    for (auto entry : connMap) {
+        int fd = entry.first;
+        Connection *conn = entry.second;
+        LOGP(DEBUG, "fd=%d, conn=%p\n", fd, conn);
+    }
+    LOGP(DEBUG, "=====================\n");
+}
+
 void dataIn(int connfd, int epfd) {
     LOGP(DEBUG, "dataIn\n");
     LOGP(DEBUG, "connfd = %d\n", connfd);
+    printMap();
     ConnectionMapItrator it = connMap.begin();
     LOGP(DEBUG, "1\n");
     connMap.count(connfd);
     LOGP(DEBUG, "1\n");
+    printMap();
 
     if ((it = connMap.find(connfd)) == connMap.end()) {
         // error
@@ -310,10 +302,13 @@ void dataIn(int connfd, int epfd) {
     }
 
     LOGP(DEBUG, "dataIn, getConn\n");
+    printMap();
     Connection *conn = it->second;
+    LOGP(DEBUG, "%p\n", conn);
     Buffer **pBuff = conn->fd == connfd ? &conn->buff : &conn->upBuff;
     Buffer *buff = *pBuff ? *pBuff : (*pBuff = new Buffer(MAXLINE));
-
+    
+    printMap();
     dumpConnection(conn);
 
     LOGP(DEBUG, "dataIn, getRemainLen\n");
@@ -322,22 +317,34 @@ void dataIn(int connfd, int epfd) {
         perror("dataIn, Buffer full, but not parsed");
         exit(-1);
     }
+    printMap();
 
     LOGP(DEBUG, "dataIn, recv\n");
+    buff->print();
+    LOGP(DEBUG, "start = %ld, len = %d\n", buff->getStart() - buff->head, buff->len);
+    LOGP(DEBUG, "remainLen = %d, dataLen = %d\n", buff->getRemainLen(), buff->dataLen);
+    printMap();// ?终于定位了错误，是在这里出错，调用完recv之后，connMap被破坏
     int n = recv(connfd, buff->getStart(), buff->getRemainLen(), 0);
+    printMap();
     if (n > 0) {
         buff->push(n);
         LOGP(DEBUG, "%d bytes recv\n", n);
         LOGP(DEBUG, "%d data in buff\n", buff->dataLen);
         LOGP(DEBUG, "%d size remain in buff\n", buff->getRemainLen());
         LOGP(DEBUG, "%d buff len\n", buff->getRemainLen() + buff->dataLen);
+        buff->print();
+        LOGP(DEBUG, "before parseRecvData\n");
+        printMap();
         int ret = parseRecvData(buff, connfd, conn, epfd);
+        LOGP(DEBUG, "after parseRecvData\n");
+        printMap();
         if (!ret && buff->isEmpty()) {
             // 释放接收缓存，之后改用缓存池
             LOGP(DEBUG, "dataIn, delete buff\n");
             *pBuff = NULL;
             delete buff;
         }
+        printMap();
     } else if (n == 0) {
         closeConnection(conn, epfd);
     } else {
