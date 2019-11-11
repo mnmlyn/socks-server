@@ -13,7 +13,7 @@
 #include "Connection.h"
 #include "logging.h"
 
-#define MAXLINE 4096
+#define MAXLINE 4096*2
 char recvbuff[MAXLINE];
 char sendbuff[MAXLINE];
 ConnectionMap connMap;
@@ -66,7 +66,7 @@ void acceptOne(int listenfd, int epfd) {
         return;
     }
     setnonblocking(connfd);
-    ev.events = EPOLLIN | EPOLLET;
+    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
     ev.data.fd = connfd;
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, connfd ,&ev) == -1) {
         perror("epoll_ctl: connfd");
@@ -81,6 +81,14 @@ void acceptOne(int listenfd, int epfd) {
         exit(-1);
     }
     connMap[connfd] = conn;
+}
+
+void epollDelFd(int connfd, int epfd) {
+    struct epoll_event ev;
+    if (epoll_ctl(epfd, EPOLL_CTL_DEL, connfd ,&ev) == -1) {
+        perror("epoll_ctl: connfd");
+        exit(-1);
+    }
 }
 
 void closeConnection(Connection *conn, int epfd) {
@@ -106,7 +114,7 @@ void closeConnection(Connection *conn, int epfd) {
         }
 
         connMap.erase(fds[i]);
-        LOGP(DEBUG, "closeConnection, fd = %d\n", fds[i]);
+        LOGP(TRACE, "closeConnection, fd = %d\n", fds[i]);
     }
     delete conn;
     printMap();
@@ -169,6 +177,7 @@ int connectUp(Connection *conn, int epfd, uint32_t ip, uint16_t port) {
     servaddr.sin_addr.s_addr = ip;// ip and port: network byte order
     servaddr.sin_port = port;
     ret = connect(fd, (struct sockaddr *)(&servaddr), sizeof(servaddr));
+    LOGP(TRACE, "connecting upstream, fd=%d\n", fd);
 
     conn->fd_up = fd;
     connMap[fd] = conn;
@@ -203,8 +212,43 @@ int replyReadyToRelay(Connection *conn) {
         perror("replyReadyToRelay, send error\n");
         return -1;
     }
+    LOGP(TRACE, "send data, fd=%d, n=%d\n", fd, 8);
     conn->state = ConnectionState::CS_RELAY;
     return 0;
+}
+
+/**
+ * 返回-2代表发送出错，应该直接干掉这个连接
+ * 返回大于0代表发送成功
+ * 返回-1代表发送会阻塞
+ */
+int sendBufferToFd(Buffer *buff, int connfd, int epfd) {
+    int n;
+    struct epoll_event ev;
+    LOGP(DEBUG, "sendBufferToFd\n");
+    if (buff == NULL) {
+        // bug
+        perror("sendBufferToFd, buff == NULL\n");
+        exit(-1);
+    }
+
+    n = send(connfd, buff->head, buff->dataLen, 0);
+    if (n == -1 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        perror("sendBufferToFd, send error\n");
+        return -2;
+    }
+
+    if (n == -1) {
+        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+        ev.data.fd = connfd;
+        if (epoll_ctl(epfd, EPOLL_CTL_MOD, connfd ,&ev) == -1) {
+            perror("epoll_ctl: connfd");
+            exit(-1);
+        }
+    }
+    LOGP(TRACE, "send buff, connfd=%d, n=%d\n", connfd, n);
+
+    return n;
 }
 
 /**
@@ -212,12 +256,11 @@ int replyReadyToRelay(Connection *conn) {
  */
 int parseRecvData(Buffer *buff, int connfd, Connection *conn, int epfd) {
     LOGP(DEBUG, "parseRecvData\n");
-    if (buff->getRemainLen() <= 0) {
+    if (buff->dataLen <= 0) {
         // bug
-        perror("parseRecvData, RemainLen should > 0");
+        perror("parseRecvData, buff->dataLen should > 0");
     }
     int fd = conn->fd == connfd ? conn->fd_up : conn->fd;
-    struct epoll_event ev;
     bool err = false;
 
     switch(conn->state) {
@@ -265,9 +308,16 @@ int parseRecvData(Buffer *buff, int connfd, Connection *conn, int epfd) {
             } else {
                 // 代理
                 LOGP(DEBUG, "CS_RELAY, recv packet\n");
-                
-                buff->empty();
-
+                int ret = sendBufferToFd(buff, fd, epfd);
+                if (ret >= 0) {
+                    LOGP(DEBUG, "sendBufferToFd success, pop %d\n", ret);
+                    buff->pop(ret);
+                } else if (ret == -2) {
+                    LOGP(DEBUG, "sendBufferToFd err, good bye\n");
+                    err = true;
+                } else {
+                    LOGP(DEBUG, "sendBufferToFd block, wait next send\n");
+                }
             }
             break;
         default:
@@ -287,6 +337,97 @@ void dumpConnection(Connection *conn) {
     LOGP(DEBUG, "Connection: fd=%d, fd_up=%d\n", conn->fd, conn->fd_up);
 }
 
+/**
+ * conn对方向的buff不应为NULL
+ */
+void transferData(Connection *conn, bool isUp, int epfd) {
+    int n1 = -2, n2 = -2, fromfd, tofd;
+    Buffer *buff;
+    LOGP(DEBUG, "transferData\n");
+
+    if (conn == NULL) {
+        // bug
+        LOGP(WARNING, "transferData, conn == NULL\n");
+        exit(-1);
+    }
+
+    if (conn->state != ConnectionState::CS_RELAY) {
+        // bug
+        LOGP(WARNING, "transferData, conn->state err\n");
+        exit(-1);
+    }
+
+    if (isUp) {
+        fromfd = conn->fd;
+        tofd = conn->fd_up;
+        buff = conn->buff;
+    } else {
+        fromfd = conn->fd_up;
+        tofd = conn->fd;
+        buff = conn->upBuff;
+    }
+
+    if (buff == NULL) {
+        LOGP(WARNING, "transferData, buff NULL\n");
+        exit(-1);
+    }
+
+    if (tofd == CONN_FD_NOTSET) {
+        LOGP(DEBUG, "transferData, tofd closed\n");
+        closeConnection(conn, epfd);
+        return;
+    }
+
+    bool err = false;
+    for (;;) {
+        LOGP(DEBUG, "transferData, n1=%d, n2=%d, fromfd=%d, tofd=%d, err=%d\n"
+            , n1, n2, fromfd, tofd, err);
+        if (!buff->isFull() && fromfd != CONN_FD_NOTSET && n1 != -1) {
+            n1 = recv(fromfd, buff->getStart(), buff->getRemainLen(), 0);
+            if (n1 == 0) {
+                LOGP(DEBUG, "transferData, n1 == 0\n");
+                connMap.erase(fromfd);
+                epollDelFd(fromfd, epfd);
+                close(fromfd);
+                fromfd = *(fromfd == conn->fd ? &conn->fd : &conn->fd_up) = CONN_FD_NOTSET;
+            } else if (n1 == -1) {
+                LOGP(DEBUG, "transferData, n1 == -1\n");
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    LOGP(DEBUG, "transferData, n1 err\n");
+                    err = true;
+                }
+            } else {
+                buff->push(n1);
+                LOGP(DEBUG, "transferData, push n1=%d\n", n1);
+            }
+        }
+        if (!buff->isEmpty() && n2 != -1) {
+            n2 = send(tofd, buff->head, buff->dataLen, 0);
+            if (n2 >= 0) {
+                LOGP(DEBUG, "transferData, pop n2=%d\n", n2);
+                buff->pop(n2);
+            } else {
+                LOGP(DEBUG, "transferData, n2 == -1 ? %d\n", n2);
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    LOGP(DEBUG, "transferData, n2 err\n");
+                    err = true;
+                }
+            }
+        }
+
+        if (err || fromfd == CONN_FD_NOTSET && buff->isEmpty()) {
+            LOGP(DEBUG, "transferData, err occur || all done\n");
+            closeConnection(conn, epfd);
+            return;
+        }
+
+        if (n1 == -1 && buff->isEmpty() || n2 == -1 && buff->isFull() || n1 == -1 && n2 == -1) {
+            LOGP(DEBUG, "transferData, block\n");
+            return;
+        }
+    }
+}
+
 void dataIn(int connfd, int epfd) {
     LOGP(DEBUG, "dataIn\n");
     LOGP(DEBUG, "connfd = %d\n", connfd);
@@ -304,22 +445,22 @@ void dataIn(int connfd, int epfd) {
 
     dumpConnection(conn);
 
-    if (buff->getRemainLen() <= 0) {
-        // bug
-        perror("dataIn, Buffer full, but not parsed");
-        exit(-1);
+    if (conn->state == ConnectionState::CS_RELAY) {
+        LOGP(DEBUG, "conn->state == ConnectionState::CS_RELAY\n");
+        transferData(conn, conn->fd == connfd, epfd);
+        return;
     }
 
     int n = recv(connfd, buff->getStart(), buff->getRemainLen(), 0);
     if (n > 0) {
         buff->push(n);
         LOGP(DEBUG, "before parseRecvData\n");
-        buff->print();
-        printMap();
+        LOGP(TRACE, "recv data, connfd=%d, n=%d\n", connfd, n);
+        // buff->print();
+        // printMap();
         int ret = parseRecvData(buff, connfd, conn, epfd);
         LOGP(DEBUG, "after parseRecvData\n");
-        buff->print();
-        printMap();
+        //printMap();
         if (!ret && buff->isEmpty()) {
             // 释放接收缓存，之后改用缓存池
             LOGP(DEBUG, "dataIn, delete buff\n");
@@ -336,14 +477,19 @@ void dataIn(int connfd, int epfd) {
 void dataOut(int connfd, int epfd) {
     ConnectionMapItrator it;
     LOGP(DEBUG, "dataOut\n");
+    LOGP(DEBUG, "connfd = %d\n", connfd);
     if ((it = connMap.find(connfd)) == connMap.end()) {
         // bug
         perror("dataOut, connfd not find in connMap");
         exit(-1);
     }
     Connection *conn = it->second;
+    dumpConnection(conn);
     bool isUpfd = conn->fd_up == connfd;
     int fd = isUpfd ? conn->fd : conn->fd_up;
+
+    Buffer **pBuff = isUpfd ? &conn->buff : &conn->upBuff;
+    Buffer *buff = *pBuff ? *pBuff : (*pBuff = new Buffer(MAXLINE));
 
     if (conn->state == ConnectionState::CS_CONNECT) {
         if (isUpfd) {
@@ -355,6 +501,19 @@ void dataOut(int connfd, int epfd) {
         perror("dataOut, fd can out in CS_INIT state\n");
     } else if (conn->state == ConnectionState::CS_RELAY) {
         LOGP(DEBUG, "dataOut, CS_RELAY\n");
+        transferData(conn, isUpfd, epfd);
+        // if (buff != NULL && !buff->isEmpty()) {
+        //     int ret = sendBufferToFd(buff, connfd, epfd);
+        //     if (ret >= 0) {
+        //         LOGP(DEBUG, "dataOut, pop %d\n", ret);
+        //         buff->pop(ret);
+        //     } else if (ret == -2) {
+        //         LOGP(DEBUG, "dataOut, CS_RELAY, kill conn\n");
+        //         closeConnection(conn, epfd);
+        //     } else {
+        //         LOGP(DEBUG, "dataOut, CS_RELAY, block, wait next\n");
+        //     }
+        // }
         
     }
 }
@@ -428,8 +587,16 @@ int main(int argc,char** argv)
                 acceptOne(listenfd, epfd);
             } else {
                 connfd = events[i].data.fd;
+                if (!connMap.count(connfd)) {
+                    LOGP(WARNING, "connfd = %d, not in connMap\n", connfd);
+                    continue;
+                }
                 if (events[i].events & EPOLLIN) {
                     dataIn(connfd, epfd);
+                }
+                if (!connMap.count(connfd)) {
+                    LOGP(WARNING, "connfd = %d, not in connMap\n", connfd);
+                    continue;
                 }
                 if (events[i].events & EPOLLOUT) {
                     dataOut(connfd, epfd);

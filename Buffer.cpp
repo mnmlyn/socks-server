@@ -68,6 +68,10 @@ bool Buffer::isEmpty() {
     return this->dataLen == 0;
 }
 
+bool Buffer::isFull() {
+    return this->getRemainLen() <= 0;
+}
+
 void Buffer::print() {
     LOGP(DEBUG, "========print buff========\n");
 

@@ -15,6 +15,7 @@ public:
     void empty();
     void pop(int n);
     bool isEmpty();
+    bool isFull();
     ~Buffer();
 
     void print();
