@@ -46,6 +46,16 @@ void setreuseaddr(int sock)
     }  
 }
 
+void printMap() {
+    LOGP(DEBUG, "======PRINT MAP======\n");
+    for (auto entry : connMap) {
+        int fd = entry.first;
+        Connection *conn = entry.second;
+        LOGP(DEBUG, "fd=%d, conn=%p\n", fd, conn);
+    }
+    LOGP(DEBUG, "=====================\n");
+}
+
 void acceptOne(int listenfd, int epfd) {
     int connfd;
     struct epoll_event ev;
@@ -96,8 +106,10 @@ void closeConnection(Connection *conn, int epfd) {
         }
 
         connMap.erase(fds[i]);
+        LOGP(DEBUG, "closeConnection, fd = %d\n", fds[i]);
     }
     delete conn;
+    printMap();
 }
 
 bool checkSocksProtocol(Buffer *buff) {
@@ -245,7 +257,7 @@ int parseRecvData(Buffer *buff, int connfd, Connection *conn, int epfd) {
         case ConnectionState::CS_CONNECT:
             perror("conn->state == CS_CONNECT, packet recv, bad one, close it\n");
             err = true;
-            break;// ????
+            break;
         case ConnectionState::CS_RELAY:
             if (fd == CONN_FD_NOTSET) {
                 perror("conn->state == CS_RELAY, fd not set\n");
@@ -275,25 +287,10 @@ void dumpConnection(Connection *conn) {
     LOGP(DEBUG, "Connection: fd=%d, fd_up=%d\n", conn->fd, conn->fd_up);
 }
 
-void printMap() {
-    LOGP(DEBUG, "======PRINT MAP======\n");
-    for (auto entry : connMap) {
-        int fd = entry.first;
-        Connection *conn = entry.second;
-        LOGP(DEBUG, "fd=%d, conn=%p\n", fd, conn);
-    }
-    LOGP(DEBUG, "=====================\n");
-}
-
 void dataIn(int connfd, int epfd) {
     LOGP(DEBUG, "dataIn\n");
     LOGP(DEBUG, "connfd = %d\n", connfd);
-    printMap();
-    ConnectionMapItrator it = connMap.begin();
-    LOGP(DEBUG, "1\n");
-    connMap.count(connfd);
-    LOGP(DEBUG, "1\n");
-    printMap();
+    ConnectionMapItrator it;
 
     if ((it = connMap.find(connfd)) == connMap.end()) {
         // error
@@ -301,53 +298,27 @@ void dataIn(int connfd, int epfd) {
         exit(-1);
     }
 
-    LOGP(DEBUG, "dataIn, getConn\n");
-    printMap();
     Connection *conn = it->second;
-    LOGP(DEBUG, "%p\n", conn);
-    LOGP(DEBUG, "conn->buff = %p\n", conn->buff);
-    LOGP(DEBUG, "conn->upBuff = %p\n", conn->upBuff);
     Buffer **pBuff = conn->fd == connfd ? &conn->buff : &conn->upBuff;
     Buffer *buff = *pBuff ? *pBuff : (*pBuff = new Buffer(MAXLINE));
-    LOGP(DEBUG, "buff = %p\n", buff);
-    LOGP(DEBUG, "*pBuff = %p\n", *pBuff);
-    LOGP(DEBUG, "conn->buff = %p\n", conn->buff);
-    LOGP(DEBUG, "conn->upBuff = %p\n", conn->upBuff);
-    
-    printMap();
+
     dumpConnection(conn);
 
-    LOGP(DEBUG, "dataIn, getRemainLen\n");
     if (buff->getRemainLen() <= 0) {
         // bug
         perror("dataIn, Buffer full, but not parsed");
         exit(-1);
     }
-    printMap();
 
-    LOGP(DEBUG, "dataIn, recv\n");
-    buff->print();
-    LOGP(DEBUG, "start = %ld, len = %d\n", buff->getStart() - buff->head, buff->len);
-    LOGP(DEBUG, "remainLen = %d, dataLen = %d\n", buff->getRemainLen(), buff->dataLen);
-    printMap();// ?终于定位了错误，是在这里出错，调用完recv之后，connMap被破坏
-    int n = recv(connfd, recvbuff, buff->getRemainLen(), 0);
-    
-    //int n = recv(connfd, buff->getStart(), buff->getRemainLen(), 0);
-    printMap(); // ? 这里出错，看来不是recv的问题，而是将内容复制到缓冲区出错
-    LOGP(DEBUG, "n = %d\n", n);
-    memcpy(buff->getStart(), recvbuff, n);
-    printMap();
+    int n = recv(connfd, buff->getStart(), buff->getRemainLen(), 0);
     if (n > 0) {
         buff->push(n);
-        LOGP(DEBUG, "%d bytes recv\n", n);
-        LOGP(DEBUG, "%d data in buff\n", buff->dataLen);
-        LOGP(DEBUG, "%d size remain in buff\n", buff->getRemainLen());
-        LOGP(DEBUG, "%d buff len\n", buff->getRemainLen() + buff->dataLen);
-        buff->print();
         LOGP(DEBUG, "before parseRecvData\n");
+        buff->print();
         printMap();
         int ret = parseRecvData(buff, connfd, conn, epfd);
         LOGP(DEBUG, "after parseRecvData\n");
+        buff->print();
         printMap();
         if (!ret && buff->isEmpty()) {
             // 释放接收缓存，之后改用缓存池
@@ -355,7 +326,6 @@ void dataIn(int connfd, int epfd) {
             *pBuff = NULL;
             delete buff;
         }
-        printMap();
     } else if (n == 0) {
         closeConnection(conn, epfd);
     } else {
