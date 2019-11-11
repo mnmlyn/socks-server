@@ -324,7 +324,11 @@ void dataIn(int connfd, int epfd) {
     LOGP(DEBUG, "start = %ld, len = %d\n", buff->getStart() - buff->head, buff->len);
     LOGP(DEBUG, "remainLen = %d, dataLen = %d\n", buff->getRemainLen(), buff->dataLen);
     printMap();// ?终于定位了错误，是在这里出错，调用完recv之后，connMap被破坏
-    int n = recv(connfd, buff->getStart(), buff->getRemainLen(), 0);
+    int n = recv(connfd, recvbuff, buff->getRemainLen(), 0);
+    
+    //int n = recv(connfd, buff->getStart(), buff->getRemainLen(), 0);
+    printMap(); // ? 这里出错，看来不是recv的问题，而是将内容复制到缓冲区出错
+    memcpy(buff->getStart(), recvbuff, n);
     printMap();
     if (n > 0) {
         buff->push(n);
