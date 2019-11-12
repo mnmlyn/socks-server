@@ -12,19 +12,20 @@
 
 #include "Connection.h"
 #include "logging.h"
+#include "BufferPool.h"
 
-#define MAXLINE 4096*2
+#define MAXLINE 4096
 char recvbuff[MAXLINE];
 char sendbuff[MAXLINE];
 ConnectionMap connMap;
 
 void setnonblocking(int sock)
 {
-    int opts;     
-    opts = fcntl(sock,F_GETFL);     
+    int opts;
+    opts = fcntl(sock,F_GETFL);
     if (opts < 0)
     {         
-        perror("fcntl(sock,GETFL)");         
+        perror("fcntl(sock,GETFL)"); 
         exit(1);
     }
     opts = opts|O_NONBLOCK;
@@ -41,8 +42,8 @@ void setreuseaddr(int sock)
     opt = 1;    
     if (setsockopt(sock,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(&opt)) < 0)     
     {         
-        perror("setsockopt");         
-        exit(1);     
+        perror("setsockopt");
+        exit(1);
     }  
 }
 
@@ -360,11 +361,11 @@ void transferData(Connection *conn, bool isUp, int epfd) {
     if (isUp) {
         fromfd = conn->fd;
         tofd = conn->fd_up;
-        buff = conn->buff;
+        buff = conn->getBuff();
     } else {
         fromfd = conn->fd_up;
         tofd = conn->fd;
-        buff = conn->upBuff;
+        buff = conn->getUpBuff();
     }
 
     if (buff == NULL) {
@@ -423,6 +424,7 @@ void transferData(Connection *conn, bool isUp, int epfd) {
 
         if (n1 == -1 && buff->isEmpty() || n2 == -1 && buff->isFull() || n1 == -1 && n2 == -1) {
             LOGP(DEBUG, "transferData, block\n");
+            conn->tryFreeBuffer();
             return;
         }
     }
@@ -440,8 +442,7 @@ void dataIn(int connfd, int epfd) {
     }
 
     Connection *conn = it->second;
-    Buffer **pBuff = conn->fd == connfd ? &conn->buff : &conn->upBuff;
-    Buffer *buff = *pBuff ? *pBuff : (*pBuff = new Buffer(MAXLINE));
+    Buffer *buff = conn->fd == connfd ? conn->getBuff() : conn->getUpBuff();
 
     dumpConnection(conn);
 
@@ -464,8 +465,7 @@ void dataIn(int connfd, int epfd) {
         if (!ret && buff->isEmpty()) {
             // 释放接收缓存，之后改用缓存池
             LOGP(DEBUG, "dataIn, delete buff\n");
-            *pBuff = NULL;
-            delete buff;
+            conn->tryFreeBuffer();
         }
     } else if (n == 0) {
         closeConnection(conn, epfd);
@@ -488,8 +488,7 @@ void dataOut(int connfd, int epfd) {
     bool isUpfd = conn->fd_up == connfd;
     int fd = isUpfd ? conn->fd : conn->fd_up;
 
-    Buffer **pBuff = isUpfd ? &conn->buff : &conn->upBuff;
-    Buffer *buff = *pBuff ? *pBuff : (*pBuff = new Buffer(MAXLINE));
+    Buffer *buff = isUpfd ? conn->getBuff() : conn->getUpBuff();
 
     if (conn->state == ConnectionState::CS_CONNECT) {
         if (isUpfd) {
@@ -501,20 +500,7 @@ void dataOut(int connfd, int epfd) {
         perror("dataOut, fd can out in CS_INIT state\n");
     } else if (conn->state == ConnectionState::CS_RELAY) {
         LOGP(DEBUG, "dataOut, CS_RELAY\n");
-        transferData(conn, isUpfd, epfd);
-        // if (buff != NULL && !buff->isEmpty()) {
-        //     int ret = sendBufferToFd(buff, connfd, epfd);
-        //     if (ret >= 0) {
-        //         LOGP(DEBUG, "dataOut, pop %d\n", ret);
-        //         buff->pop(ret);
-        //     } else if (ret == -2) {
-        //         LOGP(DEBUG, "dataOut, CS_RELAY, kill conn\n");
-        //         closeConnection(conn, epfd);
-        //     } else {
-        //         LOGP(DEBUG, "dataOut, CS_RELAY, block, wait next\n");
-        //     }
-        // }
-        
+        transferData(conn, isUpfd, epfd);        
     }
 }
 
@@ -526,6 +512,9 @@ int main(int argc,char** argv)
     const int MAXEVENTS = 1024;                //最大事件数
     struct epoll_event events[MAXEVENTS];    //监听事件数组
  
+    BufferPool *buffPool = new BufferPool(100, MAXLINE);
+    Connection::buffPool = buffPool;
+
     epfd = epoll_create(5);
     if (epfd < 0)
     {
@@ -607,5 +596,6 @@ int main(int argc,char** argv)
     }
     close(listenfd);
     close(epfd);
+    delete buffPool;
     return 0;
 }

@@ -1,7 +1,7 @@
 #ifndef _CONNECTION_H
 #define _CONNECTION_H
 #include <unordered_map>
-#include "Buffer.h"
+#include "BufferPool.h"
 
 enum ConnectionState {
     CS_INIT,
@@ -16,11 +16,19 @@ public:
     int fd;
     int fd_up;
     ConnectionState state;
+    static BufferPool *buffPool;
+
+public:
+    Connection(int fd, int fd_up);
+    ~Connection();
+    Buffer *getBuff();
+    Buffer *getUpBuff();
+    void tryFreeBuffer();
+
+private:
     Buffer *buff;
     Buffer *upBuff;
 
-    Connection(int fd, int fd_up);
-    ~Connection();
 private:
     Connection(){};
 };

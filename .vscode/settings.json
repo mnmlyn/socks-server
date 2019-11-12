@@ -37,6 +37,9 @@
         "sstream": "cpp",
         "stdexcept": "cpp",
         "streambuf": "cpp",
-        "typeinfo": "cpp"
+        "typeinfo": "cpp",
+        "unordered_set": "cpp",
+        "map": "cpp",
+        "iostream": "cpp"
     }
 }
